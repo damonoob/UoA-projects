@@ -1,0 +1,275 @@
+% COMPSYS 723 Assignment 2 - Cruise Control System design
+% Language(s) used: C, Esterel
+% Author: Group 6 - Alan Zhu (gzhu123), Benjamin Tong (wton874)
+% Finished Date: 5th June 2017
+
+% Three modules used for the whole design:
+% Cruise Regulation, Cruise Speed Management, and Driving Control
+
+% Module Cruise Regulation: This module controls the state of the system so as to ensure the
+% whole system can react correctly in various conditions of the car.
+module cruiseRegulation:
+
+% Function declarations
+function speedInRange(float): boolean;
+function pedalOn(float): boolean;
+% Inputs
+input On, Off, Resume;
+input Accel : float, Brake : float, Speed : float;
+
+% Defining the State Type which is defined in c.
+% It is the enumeration of the CruiseState, which is in either offState (OFF), onState(ON), 
+% disableState(DISABLE) or stdbyState(STDBY) state.
+type StateType; 
+
+output CruiseState : StateType;
+constant offState : StateType, onState : StateType, disableState : StateType, stdbyState : StateType;
+
+% State variable to store the current state. Initially it is in offState.
+var state := offState : StateType in
+	loop
+		trap T1 in
+			% In OFF state
+			if state = offState then
+				% Output current state
+				emit CruiseState(state);
+				% change to ON state is On button is pressed
+				present On then
+					state := onState;
+				end present;
+				exit T1;
+			end if;
+			
+			% Abort the current state when Off button has been pressed.
+			abort
+				% In ON state
+				if state = onState then
+					% Output current state
+					emit CruiseState(state);
+					% Brake has been pressed so change to Stand by state
+					if pedalOn(?Brake) then
+						state := stdbyState;
+						exit T1;
+					end if;
+					% State stay the same if current speed is in range and
+					% accelerator has not been pressed.
+					if speedInRange(?Speed) and not pedalOn(?Accel) then
+						state:= onState;
+						exit T1;
+					end if;
+					% Else change to disable state
+					if not speedInRange(?Speed) or pedalOn(?Accel) then
+						state:= disableState;
+						exit T1;
+					end if;
+			
+					exit T1;						
+				end if;
+				% In Stand by state
+				if state = stdbyState then
+					% Output current state
+					emit CruiseState(state);
+					% Wait for Resume button to be pressed
+					await immediate Resume;
+					% Change state after pressing the Resume button
+					% Change to ON state when the current speed is in range and
+					% the accelerator has not been pressed.
+					if speedInRange(?Speed) and not pedalOn(?Accel) then
+						state := onState;
+						exit T1;
+					end if;
+					% Else change to disable state
+					if not speedInRange(?Speed) or pedalOn(?Accel) then
+						state:= disableState;
+						exit T1;
+					end if;
+				end if;
+				% In Disable state
+				if state = disableState then
+					% Output current state
+					emit CruiseState(state);
+					
+					if speedInRange(?Speed) and not pedalOn(?Accel) then
+						state := onState;
+						exit T1;
+					end if;
+				end if;
+			% Switch to OFF state immediately after pressing the Off button,
+			% no matter what state was the system in.
+			when immediate Off do
+				state := offState;
+			end abort;
+			
+		end trap;
+			
+		pause;
+	end loop;
+end var;
+
+end module
+
+% Module Cruise Speed Management: It will decide and set the desired cruise speed of the car.
+module cruiseSpeedManagement:
+
+% Inputs
+input On, Set, QuickAccel, QuickDecel;
+input Speed : float;
+
+type StateType;
+
+% Outputs
+output CruiseState : StateType, CruiseSpeed : float;
+constant offState : StateType, onState : StateType, disableState : StateType, stdbyState : StateType;
+
+% Function Declarations
+function setSpeed(float) : float;
+function cruiseSpeedAdjust(float, integer) : float;
+
+loop
+	% In ON state
+	if not (?CruiseState = offState) then
+		present
+			% Set Speed
+			case Set do
+				emit CruiseSpeed(setSpeed(?Speed));
+			% Quick Acceleration	
+			case QuickAccel do
+				emit CruiseSpeed(cruiseSpeedAdjust(pre(?CruiseSpeed), 1));
+			% Quick Decelaration
+			case QuickDecel do
+				emit CruiseSpeed(cruiseSpeedAdjust(pre(?CruiseSpeed), 0));
+		else
+			% Else cruise speed is set to previous cruise speed
+			emit CruiseSpeed(setSpeed(pre(?CruiseSpeed)));	
+		end present
+	else
+		% Set cruise speed is set to the current speed when On button is pressed
+		present On then
+			emit CruiseSpeed(setSpeed(?Speed));
+		else
+			% Set to 0 when system is in OFF state and On button is not pressed
+			emit CruiseSpeed(0.0f);
+		end present;
+	end if;
+	pause;	
+end loop
+
+end module
+
+% Module Driving Control: It will decide what level for the throttle (ThrottleCmd) should be set
+% to reach and maintain the cruise speed in ON, and the corresponding level set in OFF state. 
+module drivingControl:
+% Inputs
+input Accel : float, Brake : float, Speed : float, CruiseSpeed : float;
+
+type StateType;
+% Outputs
+output CruiseState : StateType, ThrottleCmd : float;
+constant offState : StateType, onState : StateType, disableState : StateType, stdbyState : StateType;
+
+% Function Declarations
+function regulateThrottle(integer, float, float): float;
+function speedAdjust(float, integer): float;
+function pedalOn(float): boolean;
+
+loop
+	% In ON state	
+	if (?CruiseState = onState) then
+		% Set throttle level with the corresponding inputs.
+		if pre(?CruiseState) = onState then
+			emit ThrottleCmd(regulateThrottle(0, ?CruiseSpeed, ?Speed));
+		else
+			emit ThrottleCmd(regulateThrottle(1, ?CruiseSpeed, ?Speed));
+		end if;
+	else
+		% In OFF state
+		present Accel then
+			% The throttle level is fully relied on the accelerator.
+			if pedalOn(?Accel) then
+	 			emit ThrottleCmd(?Accel);
+	 		else
+	 			% Set to 0 if accelerator is not pressed.
+	 			emit ThrottleCmd(0.0f);
+	 		end if;
+	 	else
+	 		emit ThrottleCmd(0.0f);
+	 	end present
+	end if;
+	pause;
+end loop
+end module
+
+
+% Module Cruise Control System: This is the top level module that runs three modules in parallel and connect the corresponding inputs and outputs for the whole system.
+module cruiseControlSystem:
+
+% Inputs
+input On, Off, Resume, Set, QuickDecel, QuickAccel;
+input Accel := 0.0f : float, Brake := 0.0f : float, Speed := 0.0f : float;
+
+type StateType;
+% Outputs
+output CruiseState : StateType, CruiseSpeed : float, ThrottleCmd : float;
+constant offState : StateType, onState : StateType, disableState : StateType, stdbyState : StateType;
+% Run all three module in parallel and map the top level signals to the other modules
+run cruiseRegulation[	signal On/On;
+						signal Off/Off;
+						signal Resume/Resume;
+						signal Accel/Accel;
+						signal Brake/Brake;
+						signal Speed/Speed;
+						signal CruiseState/CruiseState]
+||
+run cruiseSpeedManagement[	signal On/On;
+							signal Set/Set;
+							signal QuickAccel/QuickAccel;
+							signal QuickDecel/QuickDecel;
+							signal CruiseState/CruiseState;
+							signal Speed/Speed;
+							signal CruiseSpeed/CruiseSpeed]
+||
+run drivingControl[	signal Accel/Accel;
+					signal Brake/Brake;
+					signal Speed/Speed;
+					signal CruiseSpeed/CruiseSpeed;
+					signal CruiseState/CruiseState;
+					signal ThrottleCmd/ThrottleCmd]
+end module
+
+
+
+						
+						
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
